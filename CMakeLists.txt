@@ -25,6 +25,10 @@ set(CORE_SOURCES
     acquisition/WriteProtection.cpp
     acquisition/DiskImager.cpp
     acquisition/AcquisitionManager.cpp
+    recovery/FileCarver.cpp
+    recovery/FileValidator.cpp
+    recovery/ConfidenceScorer.cpp
+    recovery/FileClassifier.cpp
 )
 
 # Create the core static library
@@ -46,3 +50,7 @@ target_link_libraries(hashengine-test PRIVATE sih_core pthread)
 # Build the acquisition test application (write-protect -> image -> hash)
 add_executable(acquisition-test apps/acquisition-test/main.cpp)
 target_link_libraries(acquisition-test PRIVATE sih_core pthread)
+
+# Build the recovery test application (carve -> validate -> score -> classify)
+add_executable(recovery-test apps/recovery-test/main.cpp)
+target_link_libraries(recovery-test PRIVATE sih_core pthread)
