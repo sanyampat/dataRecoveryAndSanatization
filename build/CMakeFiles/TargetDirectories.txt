@@ -1,0 +1,7 @@
+/home/mirage/Desktop/SIH-cleanc/build/CMakeFiles/sih_core.dir
+/home/mirage/Desktop/SIH-cleanc/build/CMakeFiles/device-test.dir
+/home/mirage/Desktop/SIH-cleanc/build/CMakeFiles/acquisition-test.dir
+/home/mirage/Desktop/SIH-cleanc/build/CMakeFiles/sanitizer.dir
+/home/mirage/Desktop/SIH-cleanc/build/CMakeFiles/recovery-test.dir
+/home/mirage/Desktop/SIH-cleanc/build/CMakeFiles/edit_cache.dir
+/home/mirage/Desktop/SIH-cleanc/build/CMakeFiles/rebuild_cache.dir

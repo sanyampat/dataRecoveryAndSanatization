@@ -44,13 +44,35 @@ add_executable(device-test apps/device-test/main.cpp)
 target_link_libraries(device-test PRIVATE sih_core pthread)
 
 # Build the hash engine test application
-add_executable(hashengine-test apps/hashengine-test/main.cpp)
-target_link_libraries(hashengine-test PRIVATE sih_core pthread)
+# NOTE: apps/hashengine-test/main.cpp does not exist in this checkout, so
+# this target is disabled to keep `make` from failing on the whole project.
+# Re-enable once that file is added back.
+# add_executable(hashengine-test apps/hashengine-test/main.cpp)
+# target_link_libraries(hashengine-test PRIVATE sih_core pthread)
 
 # Build the acquisition test application (write-protect -> image -> hash)
 add_executable(acquisition-test apps/acquisition-test/main.cpp)
 target_link_libraries(acquisition-test PRIVATE sih_core pthread)
 
+# Build the sanitizer CLI application (drive picker -> dry-run sanitize)
+add_executable(sanitizer apps/sanitizer/main.cpp)
+target_link_libraries(sanitizer PRIVATE sih_core pthread)
+
 # Build the recovery test application (carve -> validate -> score -> classify)
 add_executable(recovery-test apps/recovery-test/main.cpp)
 target_link_libraries(recovery-test PRIVATE sih_core pthread)
+
+# Sanitizer UI (drive picker -> sanitize selected/all -> confirm -> log).
+# Uses FLTK for a small footprint that's easy to ship inside the live-OS
+# rootfs. Guarded: if FLTK isn't installed yet, the rest of the project
+# still configures and builds.
+#   Debian/Ubuntu: sudo apt install libfltk1.3-dev
+#   Arch:          sudo pacman -S fltk
+find_package(FLTK)
+if(FLTK_FOUND)
+    add_executable(sanitizer-ui apps/sanitizer-ui/main.cpp)
+    target_include_directories(sanitizer-ui PRIVATE ${FLTK_INCLUDE_DIR})
+    target_link_libraries(sanitizer-ui PRIVATE sih_core ${FLTK_LIBRARIES} pthread)
+else()
+    message(STATUS "FLTK not found - skipping sanitizer-ui target (install libfltk1.3-dev / fltk to build it)")
+endif()

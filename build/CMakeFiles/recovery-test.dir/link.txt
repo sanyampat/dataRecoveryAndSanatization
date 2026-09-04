@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/recovery-test.dir/link.d "CMakeFiles/recovery-test.dir/apps/recovery-test/main.cpp.o" -o recovery-test  libsih_core.a -lpthread /usr/lib/libcrypto.so

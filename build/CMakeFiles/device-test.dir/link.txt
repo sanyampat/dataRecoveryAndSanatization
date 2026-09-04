@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/device-test.dir/link.d "CMakeFiles/device-test.dir/apps/device-test/main.cpp.o" -o device-test  libsih_core.a -lpthread /usr/lib/libcrypto.so

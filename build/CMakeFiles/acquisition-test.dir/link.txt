@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/acquisition-test.dir/link.d "CMakeFiles/acquisition-test.dir/apps/acquisition-test/main.cpp.o" -o acquisition-test  libsih_core.a -lpthread /usr/lib/libcrypto.so
