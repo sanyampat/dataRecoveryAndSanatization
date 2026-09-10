@@ -60,6 +60,10 @@ set(CORE_SOURCES
 # Create the core static library
 add_library(sih_core STATIC ${CORE_SOURCES})
 
+set_target_properties(sih_core PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
+
 # sih_core now needs OpenSSL for HashEngine
 target_link_libraries(sih_core PRIVATE OpenSSL::Crypto)
 
