@@ -5,11 +5,16 @@
 
 namespace core::sanitization {
 
+enum class AtaDirection {
+    NON_DATA,
+    DATA_IN,
+    DATA_OUT
+};
+
 /// ATA / SATA sanitization commands:
 ///   1. ATA Sanitize — Crypto Scramble EXT  → PURGE
 ///   2. ATA Sanitize — Block Erase EXT      → PURGE
 ///   3. ATA Security Erase (Enhanced)        → PURGE
-///   4. Fallback → GenericBlockSanitizer    → CLEAR (called by SanitizationEngine)
 ///
 /// All commands sent via SCSI generic (SG_IO) ATA passthrough.
 class AtaSanitizer {
@@ -33,9 +38,9 @@ private:
     bool waitSanitizeComplete(int fd, unsigned timeoutSeconds = 600) const;
 
     // Build and send a SCSI generic ATA passthrough command
-    bool sendAtaCommand(int fd, uint8_t cmd, uint8_t feature, uint16_t count,
+    bool sendAtaCommand(int fd, uint8_t cmd, uint16_t feature, uint16_t count,
                         uint64_t lba, uint8_t* buf, size_t bufLen,
-                        bool dataIn, uint8_t* senseOut, size_t senseLen) const;
+                        AtaDirection dir, uint8_t* senseOut, size_t senseLen) const;
 };
 
 } // namespace core::sanitization

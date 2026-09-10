@@ -50,13 +50,19 @@ SanitizationResult SanitizationEngine::executeSanitization(const core::drive::Dr
                         case DeviceCapabilities::BusType::USB:  return "USB";
                         default:                                 return "Unknown";
                     }
-              }() << "\n"
-              << "  Best method available: " << caps.bestMethod() << "\n"
+              }() << "\n";
+
+    // 3. Virtual Device Routing — Must pre-empt physical methods
+    if (caps.isVirtual) {
+        std::cout << "[SanitizationEngine] Virtual device detected. Enforcing Generic Block CLEAR.\n";
+        GenericBlockSanitizer generic;
+        return generic.clear(caps);
+    }
+
+    std::cout << "  Best method available: " << caps.bestMethod() << "\n"
               << "  Assurance achievable: " << (caps.canAchievePurge() ? "PURGE" : "CLEAR") << "\n";
 
-    // 3. Dispatch to the strongest supported sanitizer
-    //    Priority order matches NIST 800-88 preference hierarchy.
-
+    // 4. Dispatch physical methods in NIST priority order
     // NVMe
     if (caps.bus == DeviceCapabilities::BusType::NVME &&
         (caps.supportsNvmeSanitizeCrypto || caps.supportsNvmeSanitizeBlock ||
@@ -75,14 +81,12 @@ SanitizationResult SanitizationEngine::executeSanitization(const core::drive::Dr
     }
 
     // SCSI
-    if ((caps.bus == DeviceCapabilities::BusType::SCSI) &&
-        (caps.supportsScsiSanitize || caps.supportsScsiFormatUnit)) {
+    if (caps.bus == DeviceCapabilities::BusType::SCSI && caps.supportsScsiSanitize) {
         ScsiSanitizer scsi;
         return scsi.purge(caps);
     }
 
-    // Fallback: Generic O_SYNC zero-fill (CLEAR) — handles USB, virtual disks,
-    // frozen-security SATA drives, and anything else.
+    // Fallback: Generic O_SYNC zero-fill (CLEAR)
     std::cerr << "[SanitizationEngine] No hardware Purge command available — "
               << "falling back to NIST Clear (generic zero-fill).\n";
     GenericBlockSanitizer generic;

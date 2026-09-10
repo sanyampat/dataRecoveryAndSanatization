@@ -1,5 +1,4 @@
 #include "GenericBlockSanitizer.h"
-#include "Verification.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -36,7 +35,7 @@ SanitizationResult GenericBlockSanitizer::clear(const DeviceCapabilities& caps) 
             case DeviceCapabilities::BusType::SATA:    return "SATA";
             case DeviceCapabilities::BusType::SCSI:    return "SCSI";
             case DeviceCapabilities::BusType::USB:     return "USB";
-            default:                                    return "Unknown";
+            default:                                   return "Unknown";
         }
     }();
     res.model         = caps.model;
@@ -53,7 +52,7 @@ SanitizationResult GenericBlockSanitizer::clear(const DeviceCapabilities& caps) 
         switch (caps.media) {
             case DeviceCapabilities::MediaType::HDD: res.mediaType = "HDD"; break;
             case DeviceCapabilities::MediaType::SSD: res.mediaType = "SSD (No Purge Available)"; break;
-            default:                                  res.mediaType = "Unknown"; break;
+            default:                                 res.mediaType = "Unknown"; break;
         }
         if (caps.bus == DeviceCapabilities::BusType::USB) res.mediaType = "USB Storage";
     }
@@ -62,35 +61,26 @@ SanitizationResult GenericBlockSanitizer::clear(const DeviceCapabilities& caps) 
     auto t0 = std::chrono::steady_clock::now();
 
     if (caps.capacityBytes == 0) {
-        res.error = "Device capacity is 0 bytes — unable to write. Check root privileges.";
+        res.error = "Device capacity is 0 bytes — unable to write.";
         return res;
     }
 
-    // -- Try O_DIRECT first (bypasses page cache for physical drives);
-    //    fall back to O_SYNC if the driver or virtual device refuses it.
+    // Open for Read/Write so we can verify with the same descriptor
     constexpr size_t kBufSize = 4ULL * 1024 * 1024;  // 4 MiB
-
-    auto openWithFlags = [&](int flags) -> int {
-        return open(caps.devicePath.c_str(), flags);
-    };
-
-    int fd = openWithFlags(O_WRONLY | O_SYNC | O_DIRECT);
+    int fd = open(caps.devicePath.c_str(), O_RDWR | O_SYNC | O_DIRECT | O_CLOEXEC);
     bool usedDirect = (fd >= 0);
 
     if (!usedDirect) {
-        // O_DIRECT rejected (common on virtual disks, tmpfs, loop devices)
-        fd = openWithFlags(O_WRONLY | O_SYNC);
+        fd = open(caps.devicePath.c_str(), O_RDWR | O_SYNC | O_CLOEXEC);
         if (fd < 0) {
             res.error = "Cannot open device for writing: " + std::string(std::strerror(errno));
             return res;
         }
-        std::cerr << "[GenericBlockSanitizer] O_DIRECT unavailable on " << caps.devicePath
-                  << " — using O_SYNC fallback.\n";
     }
 
-    // Allocate memory — must be sector-aligned for O_DIRECT
     void* rawBuf = nullptr;
-    if (posix_memalign(&rawBuf, static_cast<size_t>(caps.physicalSectorSize), kBufSize) != 0) {
+    uint32_t align = caps.physicalSectorSize > 0 ? caps.physicalSectorSize : 512;
+    if (posix_memalign(&rawBuf, align, kBufSize) != 0) {
         close(fd);
         res.error = "posix_memalign failed.";
         return res;
@@ -98,51 +88,90 @@ SanitizationResult GenericBlockSanitizer::clear(const DeviceCapabilities& caps) 
     std::memset(rawBuf, 0, kBufSize);
     char* buf = static_cast<char*>(rawBuf);
 
+    // --- Phase 1: Overwrite ---
     uint64_t written = 0;
-    bool ok = true;
+    bool writeOk = true;
 
     while (written < caps.capacityBytes) {
         uint64_t remaining = caps.capacityBytes - written;
         size_t toWrite     = static_cast<size_t>(std::min<uint64_t>(kBufSize, remaining));
 
-        // For O_DIRECT: chunk must be a multiple of physical sector size
-        if (usedDirect && toWrite % caps.physicalSectorSize != 0) {
-            toWrite = (toWrite / caps.physicalSectorSize) * caps.physicalSectorSize;
-            if (toWrite == 0) break;  // less than one sector remaining — done
+        // If the remaining bytes are unaligned, O_DIRECT will reject the final write
+        if (usedDirect && toWrite % align != 0) {
+            int flags = fcntl(fd, F_GETFL);
+            fcntl(fd, F_SETFL, flags & ~O_DIRECT);
+            usedDirect = false;
         }
 
         ssize_t r = write(fd, buf, toWrite);
         if (r <= 0) {
-            if (errno == EINVAL && usedDirect) {
-                // O_DIRECT rejected mid-write on some kernels — shouldn't happen
-                // but handle gracefully
-                std::cerr << "[GenericBlockSanitizer] O_DIRECT write error mid-stream.\n";
-            }
             res.error = "Write failed at offset " + std::to_string(written) + ": " + std::strerror(errno);
-            ok = false;
+            writeOk = false;
             break;
         }
         written += static_cast<uint64_t>(r);
     }
 
-    fsync(fd);
-    close(fd);
-    free(rawBuf);
-
     res.bytesProcessed = written;
-    res.wipePassed     = ok && (written >= caps.capacityBytes);
 
-    // Verification
+    if (fsync(fd) != 0) {
+        res.error = "fsync() failed after write sequence: " + std::string(std::strerror(errno));
+        writeOk = false;
+    }
+    
+    res.wipePassed = writeOk && (written == caps.capacityBytes);
+
+    // --- Phase 2: Full Deterministic Verification ---
     if (res.wipePassed) {
-        VerificationResult vr = Verification::verifyClear(caps);
         res.verificationAttempted = true;
-        res.verificationPassed    = vr.passed;
-        res.verificationMethod    = vr.method;
-        res.samplesChecked        = vr.samplesChecked;
-        if (!vr.passed) {
-            res.error = vr.error;
+        res.verificationMethod    = "Full Sequential Read-Back (100% Coverage)";
+
+        if (lseek(fd, 0, SEEK_SET) == (off_t)-1) {
+            res.error = "Verification failed: cannot seek to offset 0.";
+            res.verificationPassed = false;
+        } else {
+            uint64_t verified = 0;
+            bool verifyOk = true;
+
+            while (verified < caps.capacityBytes) {
+                uint64_t remaining = caps.capacityBytes - verified;
+                size_t toRead      = static_cast<size_t>(std::min<uint64_t>(kBufSize, remaining));
+
+                if (usedDirect && toRead % align != 0) {
+                    int flags = fcntl(fd, F_GETFL);
+                    fcntl(fd, F_SETFL, flags & ~O_DIRECT);
+                    usedDirect = false;
+                }
+
+                ssize_t r = read(fd, buf, toRead);
+                if (r <= 0) {
+                    res.error = "Verification read failed at offset " + std::to_string(verified) + ": " + std::strerror(errno);
+                    verifyOk = false;
+                    break;
+                }
+
+                for (ssize_t i = 0; i < r; ++i) {
+                    if (buf[i] != 0x00) {
+                        char hexStr[5];
+                        snprintf(hexStr, sizeof(hexStr), "0x%02X", static_cast<unsigned char>(buf[i]));
+                        res.error = "Verification mismatch: Expected 0x00, found " + std::string(hexStr) +
+                                    " at absolute offset " + std::to_string(verified + static_cast<uint64_t>(i));
+                        verifyOk = false;
+                        break;
+                    }
+                }
+                
+                if (!verifyOk) break;
+                verified += static_cast<uint64_t>(r);
+            }
+
+            res.verificationPassed = verifyOk && (verified == caps.capacityBytes);
+            // Note: Once SanitizationResult.h is expanded, update `res.bytesVerified = verified;` here.
         }
     }
+
+    close(fd);
+    free(rawBuf);
 
     auto t1 = std::chrono::steady_clock::now();
     res.durationSeconds = std::chrono::duration<double>(t1 - t0).count();

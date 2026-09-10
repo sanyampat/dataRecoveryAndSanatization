@@ -8,8 +8,8 @@ namespace core::sanitization {
 /// Assurance levels per NIST SP 800-88 Rev 2.
 enum class AssuranceLevel {
     NONE,   ///< No sanitization was performed.
-    CLEAR,  ///< Logical overwrite — may not erase unmapped flash cells.
-    PURGE,  ///< Hardware firmware command — clears all physical cells.
+    CLEAR,  ///< Logical/block-level sanitization (known pattern overwrite).
+    PURGE,  ///< Device-level sanitization intended to render previous data infeasible to recover according to the applicable device/storage implementation and standard.
 };
 
 inline const char* toString(AssuranceLevel level) {
@@ -40,10 +40,24 @@ struct SanitizationResult {
     uint64_t bytesProcessed  = 0;
 
     bool wipePassed               = false;
+    
+    // -----------------------------------------------------------------
+    // Verification Telemetry
+    // -----------------------------------------------------------------
     bool verificationAttempted    = false;
     bool verificationPassed       = false;
-    std::string verificationMethod; ///< e.g. "Pseudorandom Read-Back (1000 × 1 MiB samples)"
+    std::string verificationMethod; ///< e.g. "Full Sequential Read-Back", "Command Status Validation"
+    std::string verificationScope;  ///< e.g. "Full (100%)", "Sampled", "Command Status Only"
     uint32_t samplesChecked       = 0;
+    uint64_t bytesVerified        = 0;
+    std::string expectedPattern;    ///< e.g. "0x00"
+    
+    // -----------------------------------------------------------------
+    // Error & Mismatch Tracking
+    // -----------------------------------------------------------------
+    uint64_t firstMismatchOffset  = 0;
+    std::string observedByte;
+    std::string expectedByte;
 
     double durationSeconds    = 0.0;
     std::string startedAtUtc;
