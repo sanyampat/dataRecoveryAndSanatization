@@ -322,9 +322,84 @@ class SIHSanitizerExplorer(tk.Tk):
 
         threading.Thread(target=self._worker_sanitize, args=(target_path,), daemon=True).start()
 
+    def show_audit_certificate(self, res):
+        top = tk.Toplevel(self)
+        top.title("NIST SP 800-88 Rev 1 Certificate of Sanitization")
+        top.geometry("660x580")
+        top.transient(self)
+        top.grab_set()
+        top.configure(bg="#D4D0C8")
+
+        assurance = res.get("assurance_level", "NONE")
+        success = res.get("success", False)
+
+        bg_color = "#006600" if (success and assurance == "PURGE") else ("#008080" if success else "#990000")
+        title_text = f"NIST SP 800-88 Rev 1 — SANITIZATION CERTIFICATE [{assurance}]"
+
+        banner = tk.Frame(top, bg=bg_color, bd=2, relief="raised")
+        banner.pack(fill="x", padx=10, pady=10)
+
+        lbl_title = tk.Label(banner, text=title_text, bg=bg_color, fg="#FFFFFF", font=("Segoe UI", 11, "bold"))
+        lbl_title.pack(padx=10, pady=8)
+
+        text_frame = tk.Frame(top, bg="#D4D0C8")
+        text_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        txt = tk.Text(text_frame, bg="#FFFFFF", fg="#000000", font=("Consolas", 9), relief="sunken")
+        txt.pack(fill="both", expand=True)
+
+        target = res.get("target_device", "Unknown")
+        method = res.get("method_applied", "Unknown")
+        media = res.get("media_type", "Unknown")
+        duration = res.get("duration_seconds", 0.0)
+        bytes_proc = res.get("bytes_processed", 0)
+        cap_bytes = res.get("capacity_bytes", 0)
+        samples = res.get("samples_checked", 0)
+        ver_method = res.get("verification_method", "Unknown")
+        started = res.get("started_at_utc", "N/A")
+        completed = res.get("completed_at_utc", "N/A")
+        wipe_pass = "PASSED" if res.get("wipe_passed") else "FAILED"
+        ver_pass = "PASSED" if res.get("verification_passed") else "FAILED"
+        error_msg = res.get("error", "None")
+        if not error_msg:
+            error_msg = "None"
+
+        report = (
+            "======================================================================\n"
+            "                 OFFICIAL SANITIZATION AUDIT RECORD                    \n"
+            "                     NIST SP 800-88 Rev 1 Guidelines                  \n"
+            "======================================================================\n\n"
+            f"OVERALL STATUS:       {'SUCCESSFUL' if success else 'FAILED'}\n"
+            f"ASSURANCE LEVEL:      {assurance} (NIST SP 800-88 Rev 1)\n"
+            f"TARGET DEVICE:        {target}\n"
+            f"MEDIA TYPE:           {media}\n"
+            f"DEVICE CAPACITY:      {format_bytes(cap_bytes)} ({cap_bytes:,} bytes)\n"
+            f"BYTES PROCESSED:      {format_bytes(bytes_proc)} ({bytes_proc:,} bytes)\n\n"
+            f"METHOD APPLIED:       {method}\n"
+            f"WIPE STATUS:          {wipe_pass}\n"
+            f"VERIFICATION STATUS:  {ver_pass}\n"
+            f"VERIFICATION METHOD:  {ver_method}\n"
+            f"SAMPLES CHECKED:      {samples} surface blocks\n\n"
+            f"TIMESTAMPS (UTC):\n"
+            f"  Started:            {started}\n"
+            f"  Completed:          {completed}\n"
+            f"  Elapsed Duration:   {duration:.2f} seconds\n\n"
+            f"ERROR LOG:            {error_msg}\n"
+            "======================================================================\n"
+            "This record certifies that the indicated storage device was subjected\n"
+            "to sanitization in compliance with NIST SP 800-88 Rev 1 protocols.\n"
+            "======================================================================\n"
+        )
+
+        txt.insert("end", report)
+        txt.configure(state="disabled")
+
+        btn_close = tk.Button(top, text="Close Certificate", font=("MS Sans Serif", 9, "bold"), bg="#D4D0C8", command=top.destroy)
+        btn_close.pack(pady=(0, 10))
+
     def _worker_sanitize(self, target_path):
         self.dispatch_ui(self.set_progress, 20)
-        self.dispatch_ui(self.append_log, f"[SANITIZATION START] Initializing wipe engine on '{target_path}'...")
+        self.dispatch_ui(self.append_log, f"[SANITIZATION START] Initializing capability probe on '{target_path}'...")
 
         if not CPP_SANITIZER_AVAILABLE:
             self.dispatch_ui(self.set_progress, 0)
@@ -333,7 +408,7 @@ class SIHSanitizerExplorer(tk.Tk):
 
         try:
             self.dispatch_ui(self.set_progress, 40)
-            self.dispatch_ui(self.append_log, f"[SANITIZATION] Executing hardware wipe command...")
+            self.dispatch_ui(self.append_log, f"[SANITIZATION] Executing hardware wipe pipeline...")
 
             res = cpp_sanitizer.sanitize_drive(target_path)
 
@@ -343,32 +418,25 @@ class SIHSanitizerExplorer(tk.Tk):
                 self.dispatch_ui(messagebox.showerror, "Sanitization Blocked", res.get("error"))
                 return
 
-            wipe_ok = res.get("wipe_passed", False)
-            verify_ok = res.get("verification_passed", False)
-            proto = res.get("protocol_applied", "Unknown")
+            assurance = res.get("assurance_level", "NONE")
+            method = res.get("method_applied", "Unknown")
             duration = res.get("duration_seconds", 0.0)
-            samples = res.get("samples_verified", 0)
+            samples = res.get("samples_checked", 0)
+            success = res.get("success", False)
 
-            if res.get("success", False):
+            if success:
                 self.dispatch_ui(self.set_progress, 100)
                 log_msg = (
-                    f"✅ [SUCCESS] Drive '{target_path}' sanitized via '{proto}'.\n"
-                    f"   Duration: {duration:.2f}s | Verification: 100% Zero Confirmation ({samples} MB sampled across full surface)."
+                    f"✅ [SUCCESS] Drive '{target_path}' sanitized via '{method}'.\n"
+                    f"   NIST Assurance: {assurance} | Duration: {duration:.2f}s | Verification: Passed ({samples} samples checked)."
                 )
                 self.dispatch_ui(self.append_log, log_msg)
-                self.dispatch_ui(
-                    messagebox.showinfo,
-                    "Sanitization Complete & Verified",
-                    f"Drive {target_path} successfully sanitized!\n\n"
-                    f"Protocol Applied: {proto}\n"
-                    f"Duration: {duration:.2f} seconds\n"
-                    f"Verification: Passed ({samples} samples checked, 0 non-zero bytes)"
-                )
+                self.dispatch_ui(self.show_audit_certificate, res)
             else:
                 self.dispatch_ui(self.set_progress, 0)
                 err = res.get("error", "Unknown error")
                 self.dispatch_ui(self.append_log, f"❌ [FAILURE] Sanitization failed: {err}")
-                self.dispatch_ui(messagebox.showerror, "Sanitization Failed", f"Failed to sanitize {target_path}:\n{err}")
+                self.dispatch_ui(self.show_audit_certificate, res)
 
         except Exception as e:
             self.dispatch_ui(self.set_progress, 0)

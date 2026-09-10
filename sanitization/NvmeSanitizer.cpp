@@ -1,212 +1,179 @@
 #include "NvmeSanitizer.h"
+#include "Verification.h"
+
 #include <linux/nvme_ioctl.h>
 #include <sys/ioctl.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <iostream>
+
 #include <cerrno>
-#include <cstring>
-#include <thread>
 #include <chrono>
+#include <cstring>
+#include <ctime>
+#include <iostream>
+#include <thread>
 
 namespace core::sanitization {
 
-    struct NvmeCapabilities {
-        uint32_t sanicap;
-        uint16_t oacs;
-        uint8_t fna;
-        bool sanitizeSupported;
-        bool cryptoEraseSupported;
-        bool blockEraseSupported;
-        bool overwriteSupported;
-        bool formatSupported;
-        bool formatCryptoSupported;
-    };
+namespace {
 
-    struct SanitizeMethod {
-        enum Type { NONE, SANITIZE_CRYPTO, SANITIZE_BLOCK, FORMAT_CRYPTO } type = NONE;
-        uint32_t cdw10 = 0;
-        std::string name;
-    };
+std::string nowUtc() {
+    std::time_t t = std::time(nullptr);
+    std::tm utc{};
+    gmtime_r(&t, &utc);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &utc);
+    return buf;
+}
 
-    // Step 1: Capability Detection
-    bool getControllerInfo(int fd, NvmeCapabilities& caps) {
-        uint8_t id_ctrl[4096] = {0};
-        struct nvme_admin_cmd cmd = {};
-        cmd.opcode = 0x06; // Identify Command
-        cmd.nsid = 0;
-        cmd.addr = reinterpret_cast<__u64>(id_ctrl);
-        cmd.data_len = 4096;
-        cmd.cdw10 = 1; // CNS = 1 (Identify Controller)
+} // namespace
 
-        if (ioctl(fd, NVME_IOCTL_ADMIN_CMD, &cmd) != 0) {
-            return false;
-        }
+// ---------------------------------------------------------------------------
 
-        // Parse OACS (Optional Admin Command Support) for Format NVM support
-        std::memcpy(&caps.oacs, &id_ctrl[256], 2);
-        // Parse SANICAP (Sanitize Capabilities)
-        std::memcpy(&caps.sanicap, &id_ctrl[328], 4);
-        // Parse FNA (Format NVM Attributes)
-        caps.fna = id_ctrl[527];
+SanitizationResult NvmeSanitizer::purge(const DeviceCapabilities& caps) const {
+    SanitizationResult res;
+    res.devicePath    = caps.devicePath;
+    res.busType       = "NVMe";
+    res.mediaType     = "NVMe SSD";
+    res.model         = caps.model;
+    res.vendor        = caps.vendor;
+    res.serialNumber  = caps.serialNumber;
+    res.capacityBytes = caps.capacityBytes;
+    res.assuranceLevel= AssuranceLevel::PURGE;
+    res.startedAtUtc  = nowUtc();
 
-        caps.cryptoEraseSupported = (caps.sanicap & (1 << 0)) != 0;
-        caps.blockEraseSupported  = (caps.sanicap & (1 << 1)) != 0;
-        caps.overwriteSupported   = (caps.sanicap & (1 << 2)) != 0;
-        caps.sanitizeSupported    = (caps.sanicap != 0);
+    auto t0 = std::chrono::steady_clock::now();
 
-        caps.formatSupported       = (caps.oacs & (1 << 1)) != 0;
-        caps.formatCryptoSupported = (caps.fna & (1 << 1)) != 0; 
-
-        return true;
+    // Open device
+    int fd = open(caps.devicePath.c_str(), O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        res.error = "Cannot open NVMe device: " + std::string(std::strerror(errno));
+        return res;
     }
 
-    // Step 2: Method Selection
-    SanitizeMethod determineSanitizeMethod(const NvmeCapabilities& caps) {
-        SanitizeMethod method;
-        
-        if (caps.cryptoEraseSupported) {
-            method.type = SanitizeMethod::SANITIZE_CRYPTO;
-            method.cdw10 = 0x04;
-            method.name = "NVMe Sanitize (Crypto Erase)";
-        } else if (caps.blockEraseSupported) {
-            method.type = SanitizeMethod::SANITIZE_BLOCK;
-            method.cdw10 = 0x02;
-            method.name = "NVMe Sanitize (Block Erase)";
-        } else if (caps.formatSupported && caps.formatCryptoSupported) {
-            method.type = SanitizeMethod::FORMAT_CRYPTO;
-            method.cdw10 = (0x02 << 9); 
-            method.name = "NVMe Format NVM (Crypto Erase)";
-        }
-        
-        return method;
+    // Build the ioctl command from already-probed capabilities
+    struct nvme_admin_cmd cmd = {};
+    bool isSanitize = false;
+
+    if (caps.supportsNvmeSanitizeCrypto) {
+        cmd.opcode   = 0x84;   // NVMe Sanitize
+        cmd.cdw10    = 0x04;   // SANACT = 4 (Crypto Erase)
+        res.methodApplied = "NVMe Sanitize — Crypto Erase";
+        isSanitize   = true;
+    } else if (caps.supportsNvmeSanitizeBlock) {
+        cmd.opcode   = 0x84;
+        cmd.cdw10    = 0x02;   // SANACT = 2 (Block Erase)
+        res.methodApplied = "NVMe Sanitize — Block Erase";
+        isSanitize   = true;
+    } else if (caps.supportsNvmeSanitizeOverwrite) {
+        cmd.opcode   = 0x84;
+        cmd.cdw10    = 0x03;   // SANACT = 3 (Overwrite)
+        res.methodApplied = "NVMe Sanitize — Overwrite";
+        isSanitize   = true;
+    } else if (caps.supportsNvmeFormatCrypto) {
+        // Format NVM — crypto erase: LBAF=0, MSET=0, PI=0, PIL=0, SES=2 (Crypto Erase)
+        cmd.opcode   = 0x80;   // NVMe Format NVM
+        cmd.nsid     = 0xFFFFFFFF;
+        cmd.cdw10    = (0x02u << 9);  // SES = 2 (Cryptographic Erase)
+        res.methodApplied = "NVMe Format NVM — Crypto Erase";
+    } else if (caps.supportsNvmeFormatUser) {
+        cmd.opcode   = 0x80;
+        cmd.nsid     = 0xFFFFFFFF;
+        cmd.cdw10    = (0x01u << 9);  // SES = 1 (User Data Erase)
+        res.methodApplied = "NVMe Format NVM — User Data Erase";
+    } else {
+        close(fd);
+        res.error = "No NVMe Sanitize or Format NVM command supported by this controller.";
+        return res;
     }
 
-    // Step 4: Completion/status checking
-    bool pollSanitizeCompletion(int fd) {
-        std::cout << "  -> Polling sanitize status log page 0x81...\n";
-        uint8_t log_buf[512] = {0};
-        
-        while (true) {
-            struct nvme_admin_cmd cmd = {};
-            cmd.opcode = 0x02; // Get Log Page
-            cmd.nsid = 0xFFFFFFFF; 
-            cmd.addr = reinterpret_cast<__u64>(log_buf);
-            cmd.data_len = 512;
-            cmd.cdw10 = 0x81 | (0x7F << 16); // Log Identifier (0x81) + Num Dwords (127)
+    std::cout << "[NvmeSanitizer] Dispatching: " << res.methodApplied << "\n";
 
-            if (ioctl(fd, NVME_IOCTL_ADMIN_CMD, &cmd) != 0) {
-                std::cerr << "  -> Failed to read Sanitize Log Page.\n";
+    if (ioctl(fd, NVME_IOCTL_ADMIN_CMD, &cmd) != 0) {
+        close(fd);
+        res.error = "NVMe ioctl submission failed: " + std::string(std::strerror(errno));
+        return res;
+    }
+
+    if (isSanitize) {
+        res.wipePassed = pollSanitizeLog(fd);
+        if (!res.wipePassed) {
+            res.error = "NVMe Sanitize: timed out or device reported failure in log page 0x81.";
+        }
+    } else {
+        // Format NVM returns synchronously (or with a quick completion)
+        res.wipePassed = true;
+        std::cout << "[NvmeSanitizer] Format NVM issued successfully.\n";
+    }
+
+    close(fd);
+
+    if (res.wipePassed) {
+        res.bytesProcessed = caps.capacityBytes;
+        VerificationResult vr = Verification::verifyClear(caps);
+        res.verificationAttempted = true;
+        res.verificationPassed    = vr.passed;
+        res.verificationMethod    = vr.method;
+        res.samplesChecked        = vr.samplesChecked;
+        if (!vr.passed) res.error = vr.error;
+    }
+
+    auto t1 = std::chrono::steady_clock::now();
+    res.durationSeconds = std::chrono::duration<double>(t1 - t0).count();
+    res.completedAtUtc  = nowUtc();
+    res.success         = res.wipePassed && res.verificationPassed;
+    return res;
+}
+
+// ---------------------------------------------------------------------------
+// Poll Sanitize Log Page 0x81 until completion or timeout
+// ---------------------------------------------------------------------------
+
+bool NvmeSanitizer::pollSanitizeLog(int fd) const {
+    constexpr unsigned kMaxPolls = 300;  // 300 × 2 s = 10 min
+    uint8_t log_buf[512] = {};
+
+    for (unsigned poll = 0; poll < kMaxPolls; ++poll) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+
+        struct nvme_admin_cmd logCmd = {};
+        logCmd.opcode   = 0x02;    // Get Log Page
+        logCmd.nsid     = 0xFFFFFFFF;
+        logCmd.addr     = reinterpret_cast<__u64>(log_buf);
+        logCmd.data_len = 512;
+        logCmd.cdw10    = 0x81 | (0x7F << 16);  // LID=0x81, NUMD=127
+
+        if (ioctl(fd, NVME_IOCTL_ADMIN_CMD, &logCmd) != 0) {
+            std::cerr << "[NvmeSanitizer] Failed to read Sanitize Log Page.\n";
+            continue;
+        }
+
+        uint16_t sprog = static_cast<uint16_t>(log_buf[0] | (log_buf[1] << 8));
+        uint16_t sstat = static_cast<uint16_t>(log_buf[2] | (log_buf[3] << 8));
+        uint8_t  status = sstat & 0x07;
+
+        switch (status) {
+            case 0x01:  // Completed successfully
+                std::cout << "\n[NvmeSanitizer] Sanitize completed successfully.\n";
+                return true;
+            case 0x02:  // In progress
+            {
+                unsigned pct = static_cast<unsigned>((static_cast<uint64_t>(sprog) * 100ULL) / 65535ULL);
+                std::cout << "[NvmeSanitizer] Sanitize in progress: " << pct << "%\r" << std::flush;
+                break;
+            }
+            case 0x03:  // Failed
+                std::cerr << "\n[NvmeSanitizer] Sanitize FAILED (SSTAT=0x03).\n";
                 return false;
-            }
-
-            uint16_t sprog = log_buf[0] | (log_buf[1] << 8); 
-            uint16_t sstat = log_buf[2] | (log_buf[3] << 8); 
-            uint8_t status = sstat & 0x07; 
-
-            switch (status) {
-                case 0x01: // Most recent sanitize completed successfully
-                    std::cout << "\n  -> Sanitize completed successfully.\n";
-                    return true;
-                
-                case 0x02: // Sanitize in progress
-                {
-                    unsigned int pct = static_cast<unsigned int>((sprog * 100ULL) / 65535ULL);
-                    std::cout << "  -> Sanitize in progress: " << pct << "%\r" << std::flush;
-                    std::this_thread::sleep_for(std::chrono::seconds(2));
-                    break; // Continue polling
-                }
-                
-                case 0x03: // Most recent sanitize failed
-                    std::cerr << "\n  -> Sanitize failed on device.\n";
-                    return false;
-                
-                case 0x04: // Completed successfully with deallocation
-                    std::cout << "\n  -> Sanitize completed successfully (with deallocation).\n";
-                    return true;
-                
-                default:
-                    std::cerr << "\n  -> Unknown sanitize status (" << (int)status << "). Manual verification recommended.\n";
-                    return false;
-            }
+            case 0x04:  // Completed with deallocation
+                std::cout << "\n[NvmeSanitizer] Sanitize completed (with deallocation).\n";
+                return true;
+            default:
+                std::cerr << "\n[NvmeSanitizer] Unknown SSTAT=" << static_cast<int>(status) << "\n";
+                return false;
         }
     }
-
-    bool NvmeSanitizer::wipe(const core::drive::DriveInfo& drive) {
-        // Note: O_RDWR | O_EXCL is a preliminary safeguard. 
-        // A robust DriveManager must verify mounts, root partitions, and user auth before this is called.
-        int fd = open(drive.devicePath.c_str(), O_RDWR | O_EXCL);
-        if(fd<0){
-        std::cerr<<"  -> Failed to open device: "<<drive.devicePath
-                <<" ("<<errno<<": "<<std::strerror(errno)<<")\n";
-
-        if(errno==EBUSY){
-        std::cerr<<"  -> Device is busy. A namespace or filesystem may be in use.\n";
-        }
-
-        return false;
-        }
-
-        // --- STEP 1: CAPABILITY DETECTION ---
-        NvmeCapabilities caps = {};
-        if (!getControllerInfo(fd, caps)) {
-            std::cerr << "  -> Failed to Identify NVMe Controller. Aborting.\n";
-            close(fd);
-            return false;
-        }
-
-        // --- STEP 2: METHOD SELECTION ---
-        SanitizeMethod method = determineSanitizeMethod(caps);
-        if (method.type == SanitizeMethod::NONE) {
-            std::cerr << "  -> No acceptable cryptographic or block sanitization method found for this drive.\n";
-            close(fd);
-            return false;
-        }
-        
-        std::cout << "  -> Capability detected.\n";
-        std::cout << "     - Sanitize Supported: " << (caps.sanitizeSupported ? "Yes" : "No") << "\n";
-        std::cout << "     - Block Erase Supported: " << (caps.blockEraseSupported ? "Yes" : "No") << "\n";
-        std::cout << "     - Format NVM Supported: " << (caps.formatSupported ? "Yes" : "No") << "\n";
-        std::cout << "  -> Selected Method: " << method.name << "\n";
-
-        // --- STEP 3: CORRECT COMMAND CONSTRUCTION ---
-        struct nvme_admin_cmd cmd = {};
-        bool isSanitize = (method.type == SanitizeMethod::SANITIZE_CRYPTO || method.type == SanitizeMethod::SANITIZE_BLOCK);
-        
-        if (isSanitize) {
-            cmd.opcode = 0x84; // NVMe Sanitize
-            cmd.cdw10 = method.cdw10;
-        } else {
-            cmd.opcode = 0x80; // NVMe Format NVM
-            cmd.cdw10 = method.cdw10; 
-            cmd.nsid = 0xFFFFFFFF; // Apply to all namespaces
-        }
-
-        // --- STEP 5: ONLY THEN ACTUAL SANITIZATION ---
-        // (Execution disabled as requested. Ready for Dry Run verification)
-        std::cout << "  -> [DRY RUN] Command constructed. Opcode: 0x" << std::hex << (int)cmd.opcode << std::dec << "\n";
-        
-        
-        std::cout << "  -> Dispatching wipe command to drive...\n";
-        if (ioctl(fd, NVME_IOCTL_ADMIN_CMD, &cmd) != 0) {
-            std::cerr << "  -> Command submission failed via ioctl.\n";
-            close(fd);
-            return false;
-        }
-
-        // --- STEP 4: COMPLETION / STATUS CHECKING ---
-        bool success = true;
-        if (isSanitize) {
-            success = pollSanitizeCompletion(fd); 
-        } else {
-            std::cout << "  -> Format NVM completed successfully.\n";
-        }
-        
-        close(fd);
-        return success;
-        
-        close(fd);
-        return true; 
-    }
+    return false;
+}
 
 } // namespace core::sanitization

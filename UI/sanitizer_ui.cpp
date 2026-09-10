@@ -2,6 +2,9 @@
 #include <pybind11/stl.h>
 
 #include "sanitization/SanitizationEngine.h"
+#include "sanitization/DeviceCapabilityProbe.h"
+#include "sanitization/DeviceCapabilities.h"
+#include "sanitization/SanitizationResult.h"
 #include "sanitization/Verification.h"
 #include "device/DriveInfo.h"
 #include "device/DriveManager.h"
@@ -169,73 +172,44 @@ py::dict get_sanitization_info(const std::string& device)
     py::dict d;
     d["device"] = device;
 
-    core::drive::DriveManager manager;
-    auto drives = manager.getAvailableDrives();
+    core::sanitization::DeviceCapabilityProbe probe;
+    core::sanitization::DeviceCapabilities caps;
 
-    core::drive::DriveInfo info;
-    bool found = false;
-    for (const auto& drv : drives) {
-        if (drv.devicePath == device) {
-            info = drv;
-            found = true;
-            break;
-        }
+    try {
+        caps = probe.probeByPath(device);
+    } catch (const std::exception& e) {
+        d["error"] = e.what();
+        d["recommended_protocol"] = "Unknown / Error";
+        return d;
     }
 
-    if (!found) {
-        try {
-            info = makeDriveInfo(device);
-        } catch (const std::exception& e) {
-            d["error"] = e.what();
-            d["recommended_protocol"] = "Unknown / Error";
-            return d;
-        }
-    }
+    d["bus"] = caps.busType;
+    d["media_type"] = caps.mediaType;
+    d["capacity"] = caps.capacityBytes;
+    d["is_system_disk"] = caps.isSystemDisk;
+    d["is_mounted"] = caps.isMounted;
+    d["can_sanitize"] = !caps.isSystemDisk && !caps.isMounted;
+    d["safety_status"] = caps.isSystemDisk ? "BLOCKED (Host OS System Disk)" : (caps.isMounted ? "WARNING (Device contains mounted partition)" : "SAFE (Unmounted target)");
+    d["recommended_protocol"] = caps.bestMethod();
+    d["standard"] = caps.canAchievePurge() ? "NIST SP 800-88 Rev 1 (Purge)" : "NIST SP 800-88 Rev 1 (Clear)";
+    d["description"] = "Hardware capability probing completed. Best method: " + caps.bestMethod();
+    d["recommended_passes"] = 1;
+    d["can_purge"] = caps.canAchievePurge();
+    d["assurance_level"] = caps.canAchievePurge() ? "PURGE" : "CLEAR";
+    d["is_virtual_disk"] = caps.isVirtualDisk;
 
-    std::string protocol;
-    std::string standard;
-    std::string description;
-    int recommendedPasses = 1;
+    py::dict caps_dict;
+    caps_dict["nvme_sanitize_crypto"] = caps.nvmeSanitizeCrypto;
+    caps_dict["nvme_sanitize_block"] = caps.nvmeSanitizeBlock;
+    caps_dict["nvme_sanitize_overwrite"] = caps.nvmeSanitizeOverwrite;
+    caps_dict["ata_sanitize_crypto"] = caps.ataSanitizeCrypto;
+    caps_dict["ata_sanitize_block"] = caps.ataSanitizeBlock;
+    caps_dict["ata_sanitize_overwrite"] = caps.ataSanitizeOverwrite;
+    caps_dict["ata_security_erase"] = caps.ataSecurityErase;
+    caps_dict["scsi_sanitize_overwrite"] = caps.scsiSanitizeOverwrite;
+    caps_dict["scsi_sanitize_block"] = caps.scsiSanitizeBlock;
+    d["capabilities"] = caps_dict;
 
-    switch (info.bus) {
-        case core::drive::BusType::NVME:
-            protocol = "NVMe Sanitize / Firmware Erase";
-            standard = "NIST SP 800-88 Rev 1 (Purge / Clear Fallback)";
-            description = "Attempts hardware NVMe Sanitize (Crypto / Block Erase) or NVMe Format; falls back to direct unbuffered O_DIRECT overwrite if unsupported by controller.";
-            recommendedPasses = 1;
-            break;
-        case core::drive::BusType::SATA:
-            if (!info.isRotational) {
-                protocol = "ATA Sanitize / Secure Erase";
-                standard = "NIST SP 800-88 Rev 1 (Purge / Clear Fallback)";
-                description = "Attempts firmware-level ATA Sanitize (Crypto Scramble/Block Erase) or ATA Security Erase via SCSI passthrough; falls back to unbuffered block overwrite if unsupported.";
-                recommendedPasses = 1;
-            } else {
-                protocol = "O_DIRECT Multi-Pass Overwrite";
-                standard = "DoD 5220.22-M / NIST SP 800-88 Rev 1 (Clear)";
-                description = "Direct I/O block overwrite (zeros / random patterns) followed by 1000-point pseudorandom sector verification.";
-                recommendedPasses = 3;
-            }
-            break;
-        default:
-            protocol = "O_DIRECT Zero-Fill Overwrite";
-            standard = "NIST SP 800-88 Rev 1 (Clear)";
-            description = "Direct block zero-fill overwrite bypassing kernel page cache (O_DIRECT) with 1000-point random read verification.";
-            recommendedPasses = 1;
-            break;
-    }
-
-    d["bus"] = info.getBusTypeString();
-    d["media_type"] = info.getMediaTypeString();
-    d["capacity"] = info.capacityBytes;
-    d["is_system_disk"] = info.isSystemDisk;
-    d["is_mounted"] = info.isMounted;
-    d["can_sanitize"] = !info.isSystemDisk && !info.isMounted;
-    d["safety_status"] = info.isSystemDisk ? "BLOCKED (Host OS System Disk)" : (info.isMounted ? "WARNING (Device contains mounted partition)" : "SAFE (Unmounted target)");
-    d["recommended_protocol"] = protocol;
-    d["standard"] = standard;
-    d["description"] = description;
-    d["recommended_passes"] = recommendedPasses;
     return d;
 }
 
@@ -265,67 +239,33 @@ py::dict sanitize_drive(const std::string& target_path, int /*passes*/ = 1)
             res["blocked"] = false;
             res["wipe_passed"] = false;
             res["verification_passed"] = false;
+            res["assurance_level"] = "NONE";
+            res["method_applied"] = "None";
             res["error"] = e.what();
             return res;
         }
     }
 
-    // CRITICAL SAFETY CHECK: System Disk Protection
-    if (info.isSystemDisk) {
-        res["success"] = false;
-        res["blocked"] = true;
-        res["wipe_passed"] = false;
-        res["verification_passed"] = false;
-        res["error"] = "CRITICAL SAFETY BLOCK: Target device (" + target_path + ") is an active system disk (root/boot). Sanitization blocked to prevent operating system destruction.";
-        return res;
-    }
-
-    if (info.isMounted) {
-        res["success"] = false;
-        res["blocked"] = true;
-        res["wipe_passed"] = false;
-        res["verification_passed"] = false;
-        res["error"] = "CRITICAL SAFETY BLOCK: Target device (" + target_path + ") contains actively mounted partitions. Please unmount all partitions before wiping.";
-        return res;
-    }
-
-    auto start_time = std::chrono::steady_clock::now();
-
     core::sanitization::SanitizationEngine engine;
-    auto sanitizer = engine.getSanitizerForDrive(info);
-    std::string proto = sanitizer ? sanitizer->getProtocolName() : "Unknown";
+    auto result = engine.executeSanitization(info);
 
-    bool wipeOk = false;
-    if (sanitizer) {
-        wipeOk = sanitizer->wipe(info);
-    }
-
-    bool verifyOk = false;
-    if (wipeOk) {
-        core::sanitization::Verification verifier;
-        verifyOk = verifier.verifyZeroes(info);
-    }
-
-    auto end_time = std::chrono::steady_clock::now();
-    double elapsed = std::chrono::duration<double>(end_time - start_time).count();
-
-    res["success"] = (wipeOk && verifyOk);
-    res["blocked"] = false;
-    res["wipe_passed"] = wipeOk;
-    res["verification_passed"] = verifyOk;
-    res["protocol_applied"] = proto;
-    res["duration_seconds"] = elapsed;
-    res["capacity_bytes"] = info.capacityBytes;
-    res["samples_verified"] = verifyOk ? 1000 : 0;
-    res["sample_block_size_bytes"] = 1024 * 1024;
-
-    if (!wipeOk) {
-        res["error"] = "Wipe execution failed on device " + target_path + ". Check root permissions or device lock state.";
-    } else if (!verifyOk) {
-        res["error"] = "Post-sanitization verification failed: non-zero bytes detected during pseudorandom surface sampling.";
-    } else {
-        res["error"] = "";
-    }
+    res["success"] = result.success;
+    res["blocked"] = result.blocked;
+    res["wipe_passed"] = result.wipePassed;
+    res["verification_passed"] = result.verificationPassed;
+    res["assurance_level"] = core::sanitization::toString(result.assuranceLevel);
+    res["method_applied"] = result.methodApplied;
+    res["protocol_applied"] = result.methodApplied;
+    res["media_type"] = result.mediaType;
+    res["duration_seconds"] = result.durationSeconds;
+    res["bytes_processed"] = result.bytesProcessed;
+    res["capacity_bytes"] = result.capacityBytes;
+    res["samples_checked"] = result.samplesChecked;
+    res["samples_verified"] = result.samplesChecked;
+    res["verification_method"] = result.verificationMethod;
+    res["started_at_utc"] = result.startedAtUtc;
+    res["completed_at_utc"] = result.completedAtUtc;
+    res["error"] = result.error;
 
     return res;
 }

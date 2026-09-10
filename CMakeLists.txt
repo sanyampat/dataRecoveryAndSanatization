@@ -43,9 +43,11 @@ endif()
 set(CORE_SOURCES
     device/DriveManager.cpp
     sanitization/SanitizationEngine.cpp
-    sanitization/HddSanitizer.cpp
+    sanitization/DeviceCapabilityProbe.cpp
     sanitization/NvmeSanitizer.cpp
-    sanitization/SataSanitizer.cpp
+    sanitization/AtaSanitizer.cpp
+    sanitization/ScsiSanitizer.cpp
+    sanitization/GenericBlockSanitizer.cpp
     sanitization/Verification.cpp
     acquisition/HashEngine.cpp
     acquisition/WriteProtection.cpp
