@@ -133,7 +133,7 @@ device/
 
 # 2. Forensic Acquisition
 
-The acquisition subsystem provides controlled disk imaging for forensic workflows.
+The acquisition subsystem provides controlled disk imaging for forensic workflows
 
 ### Acquisition pipeline
 
@@ -1138,7 +1138,6 @@ The authors are not responsible for:
 See [`LICENSE`](LICENSE) for the applicable license.
 
 ---
-
 # Project
 
 **SIH SanitizerOS — Data Recovery & Secure Sanitization**
