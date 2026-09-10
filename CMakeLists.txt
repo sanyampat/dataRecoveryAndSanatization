@@ -13,6 +13,32 @@ include_directories(${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/device)
 # HashEngine (acquisition module) uses OpenSSL's EVP API for SHA-256
 find_package(OpenSSL REQUIRED)
 
+# Sleuth Kit (libtsk) — used throughout recovery/ for image I/O
+# (tsk_img_open_sing / tsk_img_read / tsk_img_close / tsk_error_print).
+# libtsk-dev ships no CMake config package, so locate it manually and wrap
+# it in a proper IMPORTED target: PUBLIC usage requirements on an IMPORTED
+# target (the library file + its include dir) propagate reliably to every
+# executable that links sih_core, which a raw path passed to
+# target_link_libraries does not always do consistently.
+find_library(TSK_LIBRARY NAMES tsk)
+if(NOT TSK_LIBRARY)
+    message(FATAL_ERROR
+        "libtsk not found. Confirm libtsk-dev is installed "
+        "(expected e.g. /usr/lib/x86_64-linux-gnu/libtsk.so).")
+endif()
+
+find_path(TSK_INCLUDE_DIR NAMES tsk/libtsk.h)
+
+add_library(tsk::tsk UNKNOWN IMPORTED)
+set_target_properties(tsk::tsk PROPERTIES
+    IMPORTED_LOCATION "${TSK_LIBRARY}"
+)
+if(TSK_INCLUDE_DIR)
+    set_target_properties(tsk::tsk PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${TSK_INCLUDE_DIR}"
+    )
+endif()
+
 # Collect all core source files
 set(CORE_SOURCES
     device/DriveManager.cpp
@@ -36,6 +62,13 @@ add_library(sih_core STATIC ${CORE_SOURCES})
 
 # sih_core now needs OpenSSL for HashEngine
 target_link_libraries(sih_core PRIVATE OpenSSL::Crypto)
+
+# PUBLIC (not PRIVATE): sih_core is a STATIC library, so it has no link
+# step of its own — TSK only actually gets pulled onto a linker command
+# line when something that needs its symbols (recovery-test) links
+# sih_core. PRIVATE would stop the dependency at sih_core and it would
+# never reach recovery-test's link line at all.
+target_link_libraries(sih_core PUBLIC tsk::tsk)
 
 # Build the device test application
 add_executable(device-test apps/device-test/main.cpp)
@@ -66,8 +99,8 @@ target_link_libraries(recovery-test PRIVATE sih_core pthread)
 # Uses FLTK for a small footprint that's easy to ship inside the live-OS
 # rootfs. Guarded: if FLTK isn't installed yet, the rest of the project
 # still configures and builds.
-#   Debian/Ubuntu: sudo apt install libfltk1.3-dev
-#   Arch:          sudo pacman -S fltk
+#    Debian/Ubuntu: sudo apt install libfltk1.3-dev
+#    Arch:         sudo pacman -S fltk
 find_package(FLTK)
 if(FLTK_FOUND)
     add_executable(sanitizer-ui apps/sanitizer-ui/main.cpp)
