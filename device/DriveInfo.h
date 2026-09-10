@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include <cstdint>
 
 namespace core::drive {
@@ -33,6 +34,11 @@ struct DriveInfo {
 
     BusType bus = BusType::UNKNOWN;
     MediaType mediaType = MediaType::UNKNOWN;
+
+    // Safety and mount point tracking
+    bool isMounted = false;
+    bool isSystemDisk = false;
+    std::vector<std::string> mountPoints;
 
     // --------------------------------------------------------
     // Bus type

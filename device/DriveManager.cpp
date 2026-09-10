@@ -2,12 +2,36 @@
 
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <algorithm>
 #include <iostream>
+#include <vector>
 
 namespace fs = std::filesystem;
 
 namespace core::drive {
+
+    struct MountEntry {
+        std::string device;
+        std::string mountPoint;
+    };
+
+    static std::vector<MountEntry> readSystemMounts() {
+        std::vector<MountEntry> mounts;
+        std::ifstream file("/proc/mounts");
+        if (!file.is_open()) {
+            return mounts;
+        }
+        std::string line;
+        while (std::getline(file, line)) {
+            std::istringstream iss(line);
+            std::string dev, mnt;
+            if (iss >> dev >> mnt) {
+                mounts.push_back({dev, mnt});
+            }
+        }
+        return mounts;
+    }
 
     std::string DriveManager::readSysfsValue(
         const std::string& path
@@ -98,6 +122,8 @@ namespace core::drive {
 
             return drives;
         }
+
+        const auto mounts = readSystemMounts();
 
         // ----------------------------------------------------
         // Scan /sys/block
@@ -292,6 +318,27 @@ namespace core::drive {
                     devName,
                     basePath
                 );
+
+            // ------------------------------------------------
+            // Mount Status and System Disk Protection
+            // ------------------------------------------------
+
+            for (const auto& m : mounts) {
+                if (m.device == info.devicePath ||
+                    (m.device.rfind(info.devicePath, 0) == 0)) {
+                    info.isMounted = true;
+                    info.mountPoints.push_back(m.mountPoint);
+
+                    if (m.mountPoint == "/" ||
+                        m.mountPoint == "/boot" ||
+                        m.mountPoint == "/boot/efi" ||
+                        m.mountPoint == "/usr" ||
+                        m.mountPoint == "/etc" ||
+                        m.mountPoint == "/home") {
+                        info.isSystemDisk = true;
+                    }
+                }
+            }
 
             // ------------------------------------------------
             // Store drive

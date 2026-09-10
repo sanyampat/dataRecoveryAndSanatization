@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 
 #include "sanitization/SanitizationEngine.h"
+#include "sanitization/Verification.h"
 #include "device/DriveInfo.h"
 #include "device/DriveManager.h"
 #include "acquisition/AcquisitionManager.h"
@@ -21,6 +22,7 @@
 #include <unistd.h>
 #endif
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
@@ -108,6 +110,9 @@ py::list get_drives()
         d["rotational"] = drive.isRotational;
         d["bus"] = drive.getBusTypeString();
         d["media_type"] = drive.getMediaTypeString();
+        d["is_mounted"] = drive.isMounted;
+        d["is_system_disk"] = drive.isSystemDisk;
+        d["mount_points"] = drive.mountPoints;
 
         result.append(d);
     }
@@ -152,7 +157,10 @@ py::dict get_drive_info(const std::string& device)
     d["rotational"] = info.isRotational;
     d["bus"] = info.getBusTypeString();
     d["media_type"] = info.getMediaTypeString();
-    d["status"] = "Ready";
+    d["is_mounted"] = info.isMounted;
+    d["is_system_disk"] = info.isSystemDisk;
+    d["mount_points"] = info.mountPoints;
+    d["status"] = info.isSystemDisk ? "Protected (System Disk)" : (info.isMounted ? "Mounted" : "Ready");
     return d;
 }
 
@@ -191,40 +199,135 @@ py::dict get_sanitization_info(const std::string& device)
 
     switch (info.bus) {
         case core::drive::BusType::NVME:
-            protocol = "NVMe Sanitize / Cryptographic Erase";
-            standard = "NIST SP 800-88 Rev 1 (Purge)";
-            description = "Issues NVMe Sanitize or NVMe Format with cryptographic erase / user data erase.";
+            protocol = "NVMe Sanitize / Firmware Erase";
+            standard = "NIST SP 800-88 Rev 1 (Purge / Clear Fallback)";
+            description = "Attempts hardware NVMe Sanitize (Crypto / Block Erase) or NVMe Format; falls back to direct unbuffered O_DIRECT overwrite if unsupported by controller.";
             recommendedPasses = 1;
             break;
         case core::drive::BusType::SATA:
             if (!info.isRotational) {
-                protocol = "ATA Secure Erase / Sanitize Device";
-                standard = "NIST SP 800-88 Rev 1 (Purge)";
-                description = "Firmware-level ATA Secure Erase command executed across all flash blocks.";
+                protocol = "ATA Sanitize / Secure Erase";
+                standard = "NIST SP 800-88 Rev 1 (Purge / Clear Fallback)";
+                description = "Attempts firmware-level ATA Sanitize (Crypto Scramble/Block Erase) or ATA Security Erase via SCSI passthrough; falls back to unbuffered block overwrite if unsupported.";
                 recommendedPasses = 1;
             } else {
-                protocol = "DoD 5220.22-M (3-Pass Overwrite)";
+                protocol = "O_DIRECT Multi-Pass Overwrite";
                 standard = "DoD 5220.22-M / NIST SP 800-88 Rev 1 (Clear)";
-                description = "Multi-pass overwrite (0x00, 0xFF, Random) followed by read verification.";
+                description = "Direct I/O block overwrite (zeros / random patterns) followed by 1000-point pseudorandom sector verification.";
                 recommendedPasses = 3;
             }
             break;
         default:
-            protocol = info.isRotational ? "DoD 5220.22-M (3-Pass)" : "NIST 800-88 Clear (Zero-Fill + Verify)";
+            protocol = "O_DIRECT Zero-Fill Overwrite";
             standard = "NIST SP 800-88 Rev 1 (Clear)";
-            description = "Sequential overwrite with zero/random patterns and post-wipe read verification.";
-            recommendedPasses = info.isRotational ? 3 : 1;
+            description = "Direct block zero-fill overwrite bypassing kernel page cache (O_DIRECT) with 1000-point random read verification.";
+            recommendedPasses = 1;
             break;
     }
 
     d["bus"] = info.getBusTypeString();
     d["media_type"] = info.getMediaTypeString();
     d["capacity"] = info.capacityBytes;
+    d["is_system_disk"] = info.isSystemDisk;
+    d["is_mounted"] = info.isMounted;
+    d["can_sanitize"] = !info.isSystemDisk && !info.isMounted;
+    d["safety_status"] = info.isSystemDisk ? "BLOCKED (Host OS System Disk)" : (info.isMounted ? "WARNING (Device contains mounted partition)" : "SAFE (Unmounted target)");
     d["recommended_protocol"] = protocol;
     d["standard"] = standard;
     d["description"] = description;
     d["recommended_passes"] = recommendedPasses;
     return d;
+}
+
+py::dict sanitize_drive(const std::string& target_path, int /*passes*/ = 1)
+{
+    py::dict res;
+    res["target_device"] = target_path;
+
+    core::drive::DriveManager manager;
+    auto drives = manager.getAvailableDrives();
+
+    core::drive::DriveInfo info;
+    bool found = false;
+    for (const auto& drv : drives) {
+        if (drv.devicePath == target_path) {
+            info = drv;
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        try {
+            info = makeDriveInfo(target_path);
+        } catch (const std::exception& e) {
+            res["success"] = false;
+            res["blocked"] = false;
+            res["wipe_passed"] = false;
+            res["verification_passed"] = false;
+            res["error"] = e.what();
+            return res;
+        }
+    }
+
+    // CRITICAL SAFETY CHECK: System Disk Protection
+    if (info.isSystemDisk) {
+        res["success"] = false;
+        res["blocked"] = true;
+        res["wipe_passed"] = false;
+        res["verification_passed"] = false;
+        res["error"] = "CRITICAL SAFETY BLOCK: Target device (" + target_path + ") is an active system disk (root/boot). Sanitization blocked to prevent operating system destruction.";
+        return res;
+    }
+
+    if (info.isMounted) {
+        res["success"] = false;
+        res["blocked"] = true;
+        res["wipe_passed"] = false;
+        res["verification_passed"] = false;
+        res["error"] = "CRITICAL SAFETY BLOCK: Target device (" + target_path + ") contains actively mounted partitions. Please unmount all partitions before wiping.";
+        return res;
+    }
+
+    auto start_time = std::chrono::steady_clock::now();
+
+    core::sanitization::SanitizationEngine engine;
+    auto sanitizer = engine.getSanitizerForDrive(info);
+    std::string proto = sanitizer ? sanitizer->getProtocolName() : "Unknown";
+
+    bool wipeOk = false;
+    if (sanitizer) {
+        wipeOk = sanitizer->wipe(info);
+    }
+
+    bool verifyOk = false;
+    if (wipeOk) {
+        core::sanitization::Verification verifier;
+        verifyOk = verifier.verifyZeroes(info);
+    }
+
+    auto end_time = std::chrono::steady_clock::now();
+    double elapsed = std::chrono::duration<double>(end_time - start_time).count();
+
+    res["success"] = (wipeOk && verifyOk);
+    res["blocked"] = false;
+    res["wipe_passed"] = wipeOk;
+    res["verification_passed"] = verifyOk;
+    res["protocol_applied"] = proto;
+    res["duration_seconds"] = elapsed;
+    res["capacity_bytes"] = info.capacityBytes;
+    res["samples_verified"] = verifyOk ? 1000 : 0;
+    res["sample_block_size_bytes"] = 1024 * 1024;
+
+    if (!wipeOk) {
+        res["error"] = "Wipe execution failed on device " + target_path + ". Check root permissions or device lock state.";
+    } else if (!verifyOk) {
+        res["error"] = "Post-sanitization verification failed: non-zero bytes detected during pseudorandom surface sampling.";
+    } else {
+        res["error"] = "";
+    }
+
+    return res;
 }
 
 py::list scan_image(const std::string& image_path, const std::string& output_dir = "")
@@ -309,18 +412,16 @@ py::dict acquire_image(const std::string& device_path, const std::string& output
 class DataSanitizer
 {
 public:
-    bool sanitizeSector(const std::string& targetPath, int /*passes*/ = 3)
+    bool sanitizeSector(const std::string& targetPath, int passes = 1)
     {
-        auto drive = makeDriveInfo(targetPath);
-        core::sanitization::SanitizationEngine engine;
-        return engine.executeSanitization(drive);
+        auto res = sanitize_drive(targetPath, passes);
+        return res["success"].cast<bool>();
     }
 
     bool zeroFill(const std::string& targetPath)
     {
-        auto drive = makeDriveInfo(targetPath);
-        core::sanitization::SanitizationEngine engine;
-        return engine.executeSanitization(drive);
+        auto res = sanitize_drive(targetPath, 1);
+        return res["success"].cast<bool>();
     }
 };
 
@@ -328,9 +429,10 @@ PYBIND11_MODULE(cpp_sanitizer, m)
 {
     m.doc() = "Python bindings for the SIH C++ SanitizerOS core engine";
 
-    m.def("get_drives", &get_drives, "Get a list of all available storage drives");
+    m.def("get_drives", &get_drives, "Get a list of all available storage drives with safety metadata");
     m.def("get_drive_info", &get_drive_info, py::arg("device"), "Get detailed metadata for a drive");
     m.def("get_sanitization_info", &get_sanitization_info, py::arg("device"), "Get recommended sanitization protocol and NIST standard");
+    m.def("sanitize_drive", &sanitize_drive, py::arg("target_path"), py::arg("passes") = 1, "Sanitize drive with system protection, real verification, and audit metrics");
     m.def("scan_image", &scan_image, py::arg("image_path"), py::arg("output_dir") = "", "Scan an acquired forensic image for file signatures and carve files");
     m.def("acquire_image", &acquire_image, py::arg("device_path"), py::arg("output_image_path"), "Forensically acquire a device to raw image with write-blocking and SHA-256");
 
