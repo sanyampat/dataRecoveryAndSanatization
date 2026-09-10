@@ -150,9 +150,9 @@ private:
             const auto& drive = drives_[idx];
             log("Starting sanitization: " + drive.devicePath);
 
-            bool result = engine.executeSanitization(drive);
+            auto result = engine.executeSanitization(drive);
 
-            if (result) {
+            if (result.success) {
                 log("  -> completed: " + drive.devicePath);
             } else {
                 log("  -> did not execute (dry-run mode): " + drive.devicePath);

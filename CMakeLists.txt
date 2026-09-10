@@ -108,12 +108,37 @@ target_link_libraries(recovery-test PRIVATE sih_core pthread)
 #    Debian/Ubuntu: sudo apt install libfltk1.3-dev
 #    Arch:         sudo pacman -S fltk
 find_package(FLTK)
+
 if(FLTK_FOUND)
-    add_executable(sanitizer-ui apps/sanitizer-ui/main.cpp)
-    target_include_directories(sanitizer-ui PRIVATE ${FLTK_INCLUDE_DIR})
-    target_link_libraries(sanitizer-ui PRIVATE sih_core ${FLTK_LIBRARIES} pthread)
+
+    add_executable(
+        sanitizer-ui
+        apps/sanitizer-ui/main.cpp
+    )
+
+    target_include_directories(
+        sanitizer-ui
+        PRIVATE
+        /usr/include/cairo
+        ${FLTK_INCLUDE_DIR}
+    )
+
+    target_link_libraries(
+        sanitizer-ui
+        PRIVATE
+        sih_core
+        ${FLTK_LIBRARIES}
+        pthread
+    )
+
 else()
-    message(STATUS "FLTK not found - skipping sanitizer-ui target (install libfltk1.3-dev / fltk to build it)")
+
+    message(
+        STATUS
+        "FLTK not found - skipping sanitizer-ui target "
+        "(install fltk to build it)"
+    )
+
 endif()
 
 # ------------------------------------------------------------
