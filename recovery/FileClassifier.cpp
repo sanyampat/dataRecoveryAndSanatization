@@ -20,6 +20,8 @@ constexpr size_t kStreamChunkSize = 1ULL * 1024 * 1024;
 
 FileClassifier::FileClassifier(std::string outputRoot) : outputRoot_(std::move(outputRoot)) {}
 
+FileClassifier::~FileClassifier() = default;
+
 FileCategory FileClassifier::categoryFor(FileType type) {
     switch (type) {
         case FileType::JPEG: return FileCategory::Images;

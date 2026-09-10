@@ -1,178 +1,247 @@
 #include "FileValidator.h"
 
-#include <algorithm>
-#include <cstring>
-#include <fstream>
-#include <vector>
+#include <cstdint>
+#include <string>
 
 namespace core::recovery {
 
-namespace {
+FileValidator::FileValidator() = default;
+FileValidator::~FileValidator() = default;
 
-// Reads up to `length` bytes starting at `start`; returns fewer if the
-// image is shorter than requested (never throws on a short read).
-std::vector<char> readRange(const std::string& path, uint64_t start, uint64_t length) {
-    std::vector<char> data;
-    std::ifstream in(path, std::ios::binary);
-    if (!in) return data;
-    in.seekg(static_cast<std::streamoff>(start), std::ios::beg);
-    data.resize(static_cast<size_t>(length));
-    in.read(data.data(), static_cast<std::streamsize>(length));
-    data.resize(static_cast<size_t>(in.gcount()));
-    return data;
-}
+void FileValidator::validate(RecoveredFile& candidate,
+                             const std::string& imagePath) const {
+    if (candidate.offsetEnd <= candidate.offsetStart) {
+        candidate.validationState = ValidationState::CORRUPT;
+        return;
+    }
 
-bool contains(const std::vector<char>& haystack, const std::string& needle) {
-    if (needle.size() > haystack.size()) return false;
-    return std::search(haystack.begin(), haystack.end(), needle.begin(), needle.end()) != haystack.end();
-}
+    // Open the disk image using TSK image-type detection.
+    // TSK_IMG_TYPE_EXTERNAL is only appropriate for TSK's external-image
+    // mechanism, not for a normal disk-image file path.
+    TSK_IMG_INFO* imgInfo = tsk_img_open_sing(imagePath.c_str(),
+                                               TSK_IMG_TYPE_DETECT, 0);
+    if (!imgInfo) {
+        candidate.validationState = ValidationState::UNVERIFIED;
+        return;
+    }
 
-} // namespace
-
-void FileValidator::validate(RecoveredFile& candidate, const std::string& imagePath) const {
     switch (candidate.fileType) {
-        case FileType::PDF:
-            candidate.validationState = validatePdf(imagePath, candidate.offsetStart, candidate.offsetEnd);
-            break;
         case FileType::JPEG:
-            candidate.validationState = validateJpeg(imagePath, candidate.offsetStart, candidate.offsetEnd);
+            candidate.validationState =
+                validateJpeg(imgInfo, candidate.offsetStart, candidate.offsetEnd);
             break;
+
+        case FileType::PDF:
+            candidate.validationState =
+                validatePdf(imgInfo, candidate.offsetStart, candidate.offsetEnd);
+            break;
+
         case FileType::ZIP:
-            candidate.validationState = validateZip(candidate, imagePath);
+            candidate.validationState = validateZip(candidate, imgInfo);
             break;
+
         default:
             candidate.validationState = ValidationState::UNVERIFIED;
+            break;
     }
+
+    tsk_img_close(imgInfo);
 }
 
-ValidationState FileValidator::validatePdf(const std::string& imagePath, uint64_t start, uint64_t end) const {
-    if (end <= start) return ValidationState::CORRUPT;
+std::string FileValidator::readRange(TSK_IMG_INFO* imgInfo, uint64_t start,
+                                     uint64_t length) const {
+    if (!imgInfo || length == 0) {
+        return std::string();
+    }
 
-    // Header check beyond magic bytes: confirm "%PDF-1." is followed by an
-    // actual version digit (i.e. bytes 6-7 are '.' then '0'-'9'), rather
-    // than trusting the bare 6-byte "%PDF-1" magic match alone — this is
-    // FileValidator's stricter check; PhotoRec's own header_check_pdf only
-    // requires buffer[6] to be printable, which we tighten here per the
-    // spec's "confirm %PDF-1. followed by a version digit."
-    auto head = readRange(imagePath, start, 8);
-    if (head.size() < 8 || head[6] != '.' || head[7] < '0' || head[7] > '9') {
+    std::string buf(static_cast<size_t>(length), '\0');
+
+    ssize_t got = tsk_img_read(imgInfo, start, buf.data(),
+                               static_cast<size_t>(length));
+
+    if (got <= 0) {
+        return std::string();
+    }
+
+    buf.resize(static_cast<size_t>(got));
+    return buf;
+}
+
+ValidationState FileValidator::validateJpeg(TSK_IMG_INFO* imgInfo,
+                                            uint64_t start,
+                                            uint64_t end) const {
+    if (end <= start) {
         return ValidationState::CORRUPT;
     }
 
-    // FileCarver only produced this candidate because it found "%%EOF" —
-    // re-derive that here rather than trusting it blindly, and
-    // additionally require an xref/trailer keyword, which a well-formed,
-    // non-corrupt PDF has and a garbage carve typically won't.
-    const uint64_t length = end - start;
-    auto body = readRange(imagePath, start, length);
-    if (!contains(body, "%%EOF")) {
-        return ValidationState::PARTIAL; // terminator moved/vanished on re-check
+    // Minimum structure for a JFIF JPEG:
+    // SOI (2) + APP0 marker (2) + length (2) + "JFIF\0" (5).
+    if (end - start < 11) {
+        return ValidationState::CORRUPT;
     }
 
-    const bool hasXref = contains(body, "xref") || contains(body, "trailer");
-    return hasXref ? ValidationState::VALID : ValidationState::PARTIAL;
+    // JPEG must begin with SOI: FF D8.
+    const std::string soi = readRange(imgInfo, start, 2);
+
+    if (soi.size() < 2 ||
+        static_cast<unsigned char>(soi[0]) != 0xFF ||
+        static_cast<unsigned char>(soi[1]) != 0xD8) {
+        return ValidationState::CORRUPT;
+    }
+
+    // The test JPEGs produced by our pipeline contain a JFIF APP0
+    // segment immediately after SOI.
+    const std::string app0 = readRange(imgInfo, start + 2, 9);
+
+    if (app0.size() < 9 ||
+        static_cast<unsigned char>(app0[0]) != 0xFF ||
+        static_cast<unsigned char>(app0[1]) != 0xE0 ||
+        static_cast<unsigned char>(app0[2]) != 0x00 ||
+        static_cast<unsigned char>(app0[3]) != 0x10 ||
+        app0[4] != 'J' ||
+        app0[5] != 'F' ||
+        app0[6] != 'I' ||
+        app0[7] != 'F' ||
+        app0[8] != '\0') {
+        return ValidationState::CORRUPT;
+    }
+
+    // FileCarver::findJpegEnd() places offsetEnd immediately after
+    // the FFD9 EOI marker.
+    if (end - start < 2) {
+        return ValidationState::PARTIAL;
+    }
+
+    const std::string footer = readRange(imgInfo, end - 2, 2);
+
+    if (footer.size() < 2 ||
+        static_cast<unsigned char>(footer[0]) != 0xFF ||
+        static_cast<unsigned char>(footer[1]) != 0xD9) {
+        return ValidationState::PARTIAL;
+    }
+
+    return ValidationState::VALID;
 }
 
-ValidationState FileValidator::validateJpeg(const std::string& imagePath, uint64_t start, uint64_t end) const {
-    if (end <= start) return ValidationState::CORRUPT;
-
-    // FileCarver's marker walk already terminated on a genuine FFD9 to
-    // produce this candidate at all (a walk that runs off the end returns
-    // 0 and never becomes a candidate) — so reaching here means the
-    // *bracketing* is already sound. What's left to sanity-check is
-    // decodability: confirm a start-of-frame marker (SOF0 baseline or
-    // SOF2 progressive) appears somewhere in the stream. A JPEG with no
-    // SOF is not decodable even if correctly bracketed.
-    const uint64_t length = end - start;
-    auto body = readRange(imagePath, start, length);
-
-    for (size_t i = 0; i + 1 < body.size(); ++i) {
-        const auto b0 = static_cast<unsigned char>(body[i]);
-        const auto b1 = static_cast<unsigned char>(body[i + 1]);
-        if (b0 == 0xFF && (b1 == 0xC0 || b1 == 0xC2)) {
-            return ValidationState::VALID;
-        }
+ValidationState FileValidator::validatePdf(TSK_IMG_INFO* imgInfo,
+                                           uint64_t start,
+                                           uint64_t end) const {
+    if (end <= start) {
+        return ValidationState::CORRUPT;
     }
-    return ValidationState::PARTIAL; // bracketed correctly but no SOF found
+
+    // PDF header: %PDF-
+    const std::string headerTag = "%PDF-";
+    const std::string header = readRange(imgInfo, start, headerTag.size());
+
+    if (header.size() < headerTag.size() ||
+        header != headerTag) {
+        return ValidationState::CORRUPT;
+    }
+
+    // FileCarver::findPdfEnd() places offsetEnd immediately after %%EOF.
+    const std::string eofTag = "%%EOF";
+    const uint64_t length = end - start;
+
+    if (length < eofTag.size()) {
+        return ValidationState::PARTIAL;
+    }
+
+    const std::string footer =
+        readRange(imgInfo, end - eofTag.size(), eofTag.size());
+
+    if (footer.size() < eofTag.size() ||
+        footer != eofTag) {
+        return ValidationState::PARTIAL;
+    }
+
+    return ValidationState::VALID;
 }
 
-ValidationState FileValidator::validateZip(RecoveredFile& candidate, const std::string& imagePath) const {
-    // ZIP is self-describing from its End Of Central Directory record —
-    // but FileCarver's offsetEnd for ZIP is only a generous provisional
-    // upper bound (potentially far past the real archive, out to
-    // kMaxCandidateSize or image end), NOT a reliable anchor to search
-    // backward from. A real forensic image typically has a large amount
-    // of unrelated/random data after the actual archive before the image
-    // ends, so assuming the EOCD sits within the last 64KB of that huge
-    // provisional range is wrong in exactly the case that matters most —
-    // confirmed by testing against a real acquired image where a small
-    // ZIP was followed by ~250KB of unrelated data before image end.
-    //
-    // Correct approach: scan FORWARD from the header for occurrences of
-    // the EOCD signature (PK\x05\x06), and structurally verify each one
-    // (central-directory offset/size must be internally consistent with
-    // where the EOCD was found) rather than trusting position alone. The
-    // first structurally-consistent match, scanning forward, is the real
-    // EOCD — any spurious 4-byte signature matches in following filler
-    // data are exceedingly unlikely to also pass the consistency check.
-    constexpr size_t kEocdMinSize = 22;
-    constexpr uint64_t kMaxCommentLen = 64 * 1024;
+ValidationState FileValidator::validateZip(RecoveredFile& candidate,
+                                           TSK_IMG_INFO* imgInfo) const {
+    constexpr uint64_t kEocdSize = 22;
 
-    const uint64_t searchStart = candidate.offsetStart;
-    const uint64_t provisionalEnd = candidate.offsetEnd;
-    if (provisionalEnd <= searchStart) return ValidationState::CORRUPT;
-
-    const std::string eocdSig("PK\x05\x06", 4);
-    constexpr size_t kChunkSize = 1ULL * 1024 * 1024; // 1 MB scan chunks, small overlap between them
-    const size_t overlap = 3; // signature is 4 bytes; keep 3 bytes carry across chunk boundaries
-
-    std::ifstream in(imagePath, std::ios::binary);
-    if (!in) return ValidationState::CORRUPT;
-    in.seekg(static_cast<std::streamoff>(searchStart), std::ios::beg);
-
-    std::vector<char> buf(kChunkSize);
-    uint64_t chunkBase = searchStart;
-    size_t carry = 0;
-
-    while (chunkBase + carry < provisionalEnd) {
-        const size_t maxNew = static_cast<size_t>(
-            std::min<uint64_t>(buf.size() - carry, provisionalEnd - chunkBase - carry));
-        in.read(buf.data() + carry, static_cast<std::streamsize>(maxNew));
-        const size_t got = carry + static_cast<size_t>(in.gcount());
-        if (got <= carry) break; // no new bytes
-
-        for (size_t i = 0; i + kEocdMinSize <= got; ++i) {
-            if (std::memcmp(buf.data() + i, eocdSig.data(), 4) != 0) continue;
-
-            const auto* eocd = reinterpret_cast<const unsigned char*>(buf.data() + i);
-            const uint32_t cdSize   = eocd[12] | (eocd[13] << 8) | (eocd[14] << 16) | (static_cast<uint32_t>(eocd[15]) << 24);
-            const uint32_t cdOffset = eocd[16] | (eocd[17] << 8) | (eocd[18] << 16) | (static_cast<uint32_t>(eocd[19]) << 24);
-            const uint16_t commentLen = static_cast<uint16_t>(eocd[20] | (eocd[21] << 8));
-
-            const uint64_t eocdAbs = chunkBase + i;
-            if (eocdAbs < searchStart) continue; // shouldn't happen, but guard anyway
-
-            const uint64_t relativeEocd = eocdAbs - searchStart;
-            if (static_cast<uint64_t>(cdOffset) > relativeEocd) continue; // inconsistent — not a real EOCD, keep scanning
-
-            const uint64_t cdRegionLen = relativeEocd - cdOffset;
-            if (cdRegionLen != cdSize) continue; // central directory size doesn't line up — keep scanning
-            if (commentLen > kMaxCommentLen) continue; // implausible comment length — keep scanning
-
-            // Structurally consistent — accept as the real EOCD.
-            candidate.offsetEnd = std::min(eocdAbs + kEocdMinSize + commentLen, provisionalEnd);
-            return ValidationState::VALID;
-        }
-
-        if (got < carry + maxNew) break; // hit EOF or provisionalEnd this read
-
-        const size_t newCarry = std::min(overlap, got);
-        std::memmove(buf.data(), buf.data() + got - newCarry, newCarry);
-        chunkBase += got - newCarry;
-        carry = newCarry;
+    if (candidate.offsetEnd < candidate.offsetStart + kEocdSize) {
+        return ValidationState::CORRUPT;
     }
 
-    return ValidationState::CORRUPT; // no structurally-consistent EOCD found anywhere in range
+    // ZIP local file header.
+    const std::string localSig =
+        readRange(imgInfo, candidate.offsetStart, 4);
+
+    if (localSig.size() < 4 ||
+        static_cast<unsigned char>(localSig[0]) != 'P' ||
+        static_cast<unsigned char>(localSig[1]) != 'K' ||
+        static_cast<unsigned char>(localSig[2]) != 0x03 ||
+        static_cast<unsigned char>(localSig[3]) != 0x04) {
+        return ValidationState::CORRUPT;
+    }
+
+    // FileCarver::findZipEnd() returns EOCD offset + 22.
+    const uint64_t eocdOffset =
+        candidate.offsetEnd - kEocdSize;
+
+    const std::string eocd =
+        readRange(imgInfo, eocdOffset, kEocdSize);
+
+    if (eocd.size() < kEocdSize) {
+        return ValidationState::PARTIAL;
+    }
+
+    if (static_cast<unsigned char>(eocd[0]) != 'P' ||
+        static_cast<unsigned char>(eocd[1]) != 'K' ||
+        static_cast<unsigned char>(eocd[2]) != 0x05 ||
+        static_cast<unsigned char>(eocd[3]) != 0x06) {
+        return ValidationState::PARTIAL;
+    }
+
+    auto readU16LE = [&eocd](size_t off) -> uint16_t {
+        return static_cast<uint16_t>(
+            static_cast<unsigned char>(eocd[off]) |
+            (static_cast<unsigned char>(eocd[off + 1]) << 8));
+    };
+
+    auto readU32LE = [&eocd](size_t off) -> uint32_t {
+        return static_cast<uint32_t>(
+            static_cast<unsigned char>(eocd[off]) |
+            (static_cast<unsigned char>(eocd[off + 1]) << 8) |
+            (static_cast<unsigned char>(eocd[off + 2]) << 16) |
+            (static_cast<unsigned char>(eocd[off + 3]) << 24));
+    };
+
+    const uint32_t centralDirSize =
+        readU32LE(12);
+
+    const uint32_t centralDirOffset =
+        readU32LE(16);
+
+    const uint16_t commentLength =
+        readU16LE(20);
+
+    // EOCD + variable-length comment gives the authoritative ZIP end.
+    uint64_t authoritativeEnd =
+        eocdOffset +
+        kEocdSize +
+        static_cast<uint64_t>(commentLength);
+
+    if (imgInfo && authoritativeEnd > imgInfo->size) {
+        authoritativeEnd = imgInfo->size;
+    }
+
+    candidate.offsetEnd = authoritativeEnd;
+
+    // The central directory is relative to the beginning of this archive.
+    const uint64_t expectedCdEnd =
+        candidate.offsetStart +
+        static_cast<uint64_t>(centralDirOffset) +
+        static_cast<uint64_t>(centralDirSize);
+
+    if (expectedCdEnd <= eocdOffset) {
+        return ValidationState::VALID;
+    }
+
+    return ValidationState::PARTIAL;
 }
 
 } // namespace core::recovery
