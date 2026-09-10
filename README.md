@@ -1133,7 +1133,6 @@ The authors are not responsible for:
 See [`LICENSE`](LICENSE) for the applicable license.
 
 ---
-
 # Project
 
 **SIH SanitizerOS — Data Recovery & Secure Sanitization**
