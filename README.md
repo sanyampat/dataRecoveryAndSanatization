@@ -128,7 +128,7 @@ device/
 
 # 2. Forensic Acquisition
 
-The acquisition subsystem provides controlled disk imaging for forensic workflows.
+The acquisition subsystem provides controlled disk imaging for forensic workflows
 
 ### Acquisition pipeline
 
