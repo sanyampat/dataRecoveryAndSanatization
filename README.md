@@ -1,8 +1,3 @@
-Absolutely. I checked the current GitHub repository and the README is now behind the actual project: the repo has evolved beyond the older HDD/SATA/NVMe-only description, while the current work includes capability-driven sanitization, acquisition, recovery, verification, a Python/Tkinter UI, and the Linux/bootable-environment direction. ([GitHub][1])
-
-Below is a **complete replacement `README.md`** that is more professional and accurate for the ongoing state
-
-````markdown
 # SIH SanitizerOS
 ### Forensic Data Recovery, Evidence Acquisition & Secure Storage Sanitization
 
@@ -133,7 +128,7 @@ device/
 
 # 2. Forensic Acquisition
 
-The acquisition subsystem provides controlled disk imaging for forensic workflows
+The acquisition subsystem provides controlled disk imaging for forensic workflows.
 
 ### Acquisition pipeline
 
@@ -460,9 +455,9 @@ The project includes a lightweight Linux GUI designed around the major forensic 
 ┌──────────────────────────────────────────────┐
 │ Devices                                      │
 ├──────────────────────────────────────────────┤
-│ Device │ Model │ Capacity │ Bus │ Status    │
-│ /dev/sda │ ... │ 40 GB   │ SATA│ SYSTEM    │
-│ /dev/sdb │ ... │ 3 GB    │ SATA│ SAFE      │
+│ Device │ Model │ Capacity │ Bus │ Status     │
+│ /dev/sda │ ... │ 40 GB   │ SATA│ SYSTEM      │
+│ /dev/sdb │ ... │ 3 GB    │ SATA│ SAFE        │
 └──────────────────────────────────────────────┘
 ```
 
@@ -1138,6 +1133,7 @@ The authors are not responsible for:
 See [`LICENSE`](LICENSE) for the applicable license.
 
 ---
+
 # Project
 
 **SIH SanitizerOS — Data Recovery & Secure Sanitization**
