@@ -1,8 +1,3 @@
-Absolutely. I checked the current GitHub repository and the README is now behind the actual project: the repo has evolved beyond the older HDD/SATA/NVMe-only description, while the current work includes capability-driven sanitization, acquisition, recovery, verification, a Python/Tkinter UI, and the Linux/bootable-environment direction. ([GitHub][1])
-
-Below is a **complete replacement `README.md`** that is more professional and accurate for the current state.
-
-````markdown
 # SIH SanitizerOS
 ### Forensic Data Recovery, Evidence Acquisition & Secure Storage Sanitization
 
