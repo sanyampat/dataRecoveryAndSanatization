@@ -1164,8 +1164,3 @@ If you find SIH SanitizerOS useful, consider giving the repository a ⭐ and con
 
 **Repository:**
 [https://github.com/sanyampat/dataRecoveryAndSanatization](https://github.com/sanyampat/dataRecoveryAndSanatization)
-
-```
-
-
-[1]: https://github.com/sanyampat/dataRecoveryAndSanatization "GitHub - sanyampat/dataRecoveryAndSanatization · GitHub"
