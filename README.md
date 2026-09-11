@@ -1,4 +1,4 @@
-# SIH SanitizerOS
+# SIH ForensicOS
 ### Forensic Data Recovery, Evidence Acquisition & Secure Storage Sanitization
 
 > A modular Linux-based storage forensics and sanitization platform for device discovery, forensic acquisition, deleted-file recovery, secure sanitization, and post-operation verification.
@@ -14,7 +14,7 @@
 
 ## Overview
 
-**SIH SanitizerOS** is a modular storage-forensics and secure-sanitization platform designed for controlled handling of storage devices.
+**SIH ForensicOS** is a modular storage-forensics and secure-sanitization platform designed for controlled handling of storage devices.
 
 The system combines:
 
@@ -1046,7 +1046,7 @@ Device names are assigned dynamically by Linux and can change between boots or h
 
 # Project Goals
 
-The long-term goal of SIH SanitizerOS is to provide a **portable Linux-based forensic and storage-sanitization environment** that can operate independently of a host operating system.
+The long-term goal of SIH ForensicOS is to provide a **portable Linux-based forensic and storage-sanitization environment** that can operate independently of a host operating system.
 
 The intended platform will eventually provide:
 
@@ -1105,7 +1105,7 @@ When contributing:
 
 # Disclaimer
 
-SIH SanitizerOS is intended for:
+SIH ForensicOS is intended for:
 
 * Authorized digital forensics
 * Data recovery
@@ -1136,7 +1136,7 @@ See [`LICENSE`](LICENSE) for the applicable license.
 
 # Project
 
-**SIH SanitizerOS — Data Recovery & Secure Sanitization**
+**SIH ForensicOS — Data Recovery & Secure Sanitization**
 
 GitHub:
 
@@ -1160,7 +1160,7 @@ Linux Systems
 
 ## ⭐ Support the Project
 
-If you find SIH SanitizerOS useful, consider giving the repository a ⭐ and contributing improvements.
+If you find SIH ForensicOS useful, consider giving the repository a ⭐ and contributing improvements.
 
 **Repository:**
 [https://github.com/sanyampat/dataRecoveryAndSanatization](https://github.com/sanyampat/dataRecoveryAndSanatization)
