@@ -1167,13 +1167,5 @@ If you find SIH SanitizerOS useful, consider giving the repository a ⭐ and con
 
 ```
 
-### One important change from your current README
-
-I deliberately **removed the old claims that the sanitizer simply maps `SCSI / USB / Unknown → HDD sanitizer`** because the current architecture has moved to capability probing and separate NVMe/ATA/SCSI/generic paths. Your current engine explicitly probes capabilities and dispatches to `NvmeSanitizer`, `AtaSanitizer`, `ScsiSanitizer`, or `GenericBlockSanitizer`. :contentReference[oaicite:1]{index=1}
-
-I also wouldn't call the current project **"production-ready"** yet. The repository itself currently lists hardware compatibility, automated testing, audit logging, and the bootable environment as unfinished work. :contentReference[oaicite:2]{index=2}
-
-If you want, I can also make you a **much more polished GitHub README with a hero banner, feature cards, architecture diagram, badges, screenshots section, demo GIF section, and a professional SIH project presentation style**.
-```
 
 [1]: https://github.com/sanyampat/dataRecoveryAndSanatization "GitHub - sanyampat/dataRecoveryAndSanatization · GitHub"
